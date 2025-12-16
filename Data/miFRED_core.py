@@ -22,8 +22,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 def parse_args():
     parser = argparse.ArgumentParser(
                     prog='miFRED',
-                    description='Microbial functional redundancy calculator from metagenomics data: community-level functional redundancy (FREDc) and redundancy of 86 metabolic and ecological phenotypes (FREDs)',
-                    epilog='Developed by Metabioinfomics Lab, University of Padova')
+                    description='Microbial functional redundancy calculator from metagenomics data: community-level functional redundancy (FREDc) and redundancy of 86 metabolic and ecological phenotypes (FREDs)')
     group_genomes = parser.add_mutually_exclusive_group(required = True)
     group_genomes.add_argument('-g', '--genomes_folder', help = 'Directory where genomes fastq files are stored') 
     group_genomes.add_argument('--all_genomes', help = 'Multifasta file obtained concatenating all single fastq files')
