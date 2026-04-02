@@ -33,7 +33,7 @@ if [ -e "$output_dir/input_fred/nreads.txt" ]; then
 fi
 #conda activate samtools
 for bam in $bam_folder/*sorted.bam; do
-    nreads=$(samtools view -@ proc -c $bam)
+    nreads=$(samtools view -@ $proc -c $bam)
     echo "Processing $bam ..."
     echo "$bam $nreads" >> $output_dir/input_fred/nreads.txt
 done
