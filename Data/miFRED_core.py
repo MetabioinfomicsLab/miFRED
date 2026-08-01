@@ -11,7 +11,7 @@ import warnings
 import re
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+import numpy as np
 from multiprocessing import Pool
 from tqdm import tqdm
 
@@ -24,8 +24,8 @@ def parse_args():
                     prog='miFRED',
                     description='Microbial functional redundancy calculator from metagenomics data: community-level functional redundancy (FREDc) and redundancy of 86 metabolic and ecological phenotypes (FREDs)')
     group_genomes = parser.add_mutually_exclusive_group(required = True)
-    group_genomes.add_argument('-g', '--genomes_folder', help = 'Directory where genomes fastq files are stored') 
-    group_genomes.add_argument('--all_genomes', help = 'Multifasta file obtained concatenating all single fastq files')
+    group_genomes.add_argument('-g', '--genomes_folder', help = 'Directory where genomes fasta files are stored') 
+    group_genomes.add_argument('--all_genomes', help = 'Multifasta file obtained concatenating all single fasta files')
     parser.add_argument('--binning_file', help = '.txt file with each line listing a scaffold and the corresponding genome/bin name, tab-seperated')
     group = parser.add_mutually_exclusive_group(required = True)
     group.add_argument('-r', '--reads_folder', help = 'Directory where metagenomic reads fastq files are stored')
@@ -34,17 +34,18 @@ def parse_args():
     parser.add_argument('-o', '--output_folder', required = True, help = 'Output directory')
     parser.add_argument('-x', '--genomes_extension', default = '.fa', help = 'Genome files extension')
     parser.add_argument('-p', '--processors', default = 5, type = int, help = 'threads (default: 5)')
-    group_annotations =  parser.add_mutually_exclusive_group(required = True)
+    group_annotations =  parser.add_mutually_exclusive_group()
     group_annotations.add_argument('-A', '--eggnog_annotation', help = 'Directory where genomes eggNOG .annotations files are stored. .csv file obtained from parsing .annotations files can be directly provided, with genomes as rows, KO as columns and KO counts as values. First column must be named "Genomes')
     group_annotations.add_argument('-db', '--eggnog_database', help = 'Directory where eggNOG-mapper database is stored')
     parser.add_argument('-sm', '--eggnog_sensmode', default = 'sensitive', choices = ['default', 'fast', 'mid-sensitive', 'sensitive', 'more-sensitive', 'very-sensitive','ultra-sensitive'], help = 'eggNOG-mapper Diamond search option: either default, fast, mid-sensitive, sensitive, more-sensitive, very-sensitive or ultra-sensitive. (default: sensitive)')
     parser.add_argument('-f', '--functions_list', help = '.txt file containing MICROPHERRET functions to be considered for the calculation, one per line. (default: 86 functions whose models were accurate on test set, stored in functions.txt)')
     parser.add_argument('-s', '--training_sets', default = 'training_sets', help = 'Folder containing the dataset.csv and dataset_acetoclastic_methanogenesis.csv files to be used in the training. (default: ./training_sets/ )')
     parser.add_argument('-c', '--covered_genome_fraction', default= 0.1, help = 'Genomes with a fraction of covered bases lower than this are reported as having zero coverage. (default: 0.10)')
-    parser.add_argument('-t', '--relative_abundance_threshold', default= 0, help = 'Mininum relative abundance threshold to be considered as present in the sample. (default: 0)')
+    parser.add_argument('-t', '--relative_abundance_threshold', default= 0, help = 'Minimum relative abundance threshold to be considered as present in the sample. (default: 0)')
+    parser.add_argument('-mp', '--minimum_phenotypes', default= 0, help = 'Minimum number of predicted phenotypes for the genome to be considered in FREDc calculation. (default: 0)')
     group_ko_vs_pred = parser.add_mutually_exclusive_group()
-    group_ko_vs_pred.add_argument('-m', '--micropherret_predictions', help = 'csv file containing MICROPHERRET predictions for all the genomes, the first column with genomes names must be unnamed.')
-    group_ko_vs_pred.add_argument('-k', '--KO', action='store_true', help = 'perform calcalution based on KO')
+    group_ko_vs_pred.add_argument('-m', '--micropherret_predictions', help = 'csv file containing MICROPHERRET predictions for all the genomes.')
+    group_ko_vs_pred.add_argument('-k', '--KO', action='store_true', help = 'perform calculation based on KO')
     args = parser.parse_args()
     
     # Post-parsing validation
@@ -53,6 +54,12 @@ def parse_args():
     
     if args.all_genomes and not args.binning_file:
         raise parser.error("Argument --binning_file is required when --all_genomes is specified.")
+    
+    if args.KO and not group_annotations:
+        raise parser.error("Either --eggnog_annotation or --eggnog_database is required when --KO is specified.")
+
+    if not args.micropherret_predictions and not group_annotations:
+        raise parser.error('Functional information missing: specify either --eggnog_annotation, --eggnog_database or --micropherret_predictions')
 
     return args
 
@@ -334,15 +341,14 @@ def get_coverage_with_threshold(genome_contigs, contigs_lengths_d, bam, reads_nu
         for g in rel_abs:
             if rel_abs[g] < thr_min:
                 rel_abs[g] = 0
-    print('Done')
 
-    return pd.Series(rel_abs_norm), pd.Series(rel_abs)
+    return pd.Series(rel_abs_norm), pd.Series(rel_abs), mapped/reads_number_sample
 
 ####################################################################
 #FREDs calculation
-def single_functions(function_index,genome_index,gen_function_1or0,gen_ra,genome_jd,total_jd):
+def single_functions(function_index,genome_index,gen_function_1or0,gen_ra):
     gen_function_1or0 = gen_function_1or0.T.to_dict()
-    topr={'Function': [], 'Number':[], 'Proportion':[], 'Relative abundance sum':[],'tShannon index':[]} 
+    topr={'Function': [], 'Number':[], 'Proportion':[], 'Relative abundance sum':[]} 
     genomes_present = [gen for gen in gen_function_1or0 if gen_ra[gen] > 0]
 
     for function in function_index:
@@ -369,15 +375,11 @@ def single_functions(function_index,genome_index,gen_function_1or0,gen_ra,genome
             num_shan=0
             for ab in abundances: 
                 num_shan+= -1*ab/total_abundance*math.log(ab/total_abundance)
-            if len(abundances)<=1:
-                topr['tShannon index'].append(0)
-            else:
-                topr['tShannon index'].append(num_shan/math.log(len(genomes_present)))
 
     return topr 
 
 #FREDc calculation
-def all_functions(gen_function_1or0,genome_jds,gen_ra,genome_index,function_index):
+def all_functions(gen_function_1or0,genome_jds,gen_ra,genome_index,function_index,mp):
     topr={} 
     value_tian=0
     num_ricotta=0
@@ -385,12 +387,17 @@ def all_functions(gen_function_1or0,genome_jds,gen_ra,genome_index,function_inde
     rao = 0
     gsi = 0
     sum_gen_ra = pd.Series(gen_ra).sum()
-
-    for gen_i in genome_jds:
+    gen_function_1or0 = gen_function_1or0.T[list(genome_index)].to_dict()
+    presents = [i for i in genome_jds if gen_ra[i] > 0]
+    for gen_i in presents:
+    #for gen_i in genome_jds:
+        if sum(gen_function_1or0[gen_i].values())<mp: continue # ignore genome 
         gen_i_jds=genome_jds[gen_i]
         gen_i_ra=gen_ra[gen_i]
         den_ricotta+=gen_i_ra*(sum_gen_ra-gen_i_ra)
-        for gen_j in genome_jds:
+        for gen_j in presents:
+        #for gen_j in genome_jds:
+            if sum(gen_function_1or0[gen_j].values())<mp: continue
             if gen_i==gen_j:
                 continue
             num_ricotta+=gen_i_ra*gen_ra[gen_j]*gen_i_jds[genome_index[gen_j]]
@@ -425,41 +432,41 @@ def get_matrix(data, metric):
     return for_pca_sumra, for_pca_sumra_red
 
 ####################################################################
-def bams_analysis(bam, contigs_lengths_d, genome_contigs, function_index, gen_ko_1or0, genome_index, genome_jds, total_jd, reads_number_sample, output_dir,thr = 0.1, thr_min = 0):
+#Launch analysis for each sample obtained from sample specific relative abundance, community-FRED and function-FRED
+#Temporary sample-specific files are generated and stored in the output_folder/output_fred folder, and then removed after the final output files are generated
+def bams_analysis(bam, contigs_lengths_d, genome_contigs, function_index, gen_ko_1or0, genome_index, genome_jds, reads_number_sample, mp, output_dir,thr = 0.1, thr_min = 0):
     ind = bam.index('.sorted')
-    bam_name = bam[:ind] #occhio all'output folder
+    bam_name = bam[:ind] #pay attention to output folder
     name_to_save = bam_name[bam_name.rfind('/'):]
     if name_to_save.startswith('/'): 
         name_to_save = name_to_save[1:]
-    rel_ab_norm, rel_ab =get_coverage_with_threshold(genome_contigs, contigs_lengths_d, bam, reads_number_sample, thr, thr_min)
+    rel_ab_norm, rel_ab, al_rate =get_coverage_with_threshold(genome_contigs, contigs_lengths_d, bam, reads_number_sample, thr, thr_min)
     rel_ab_norm = pd.Series(rel_ab_norm, name = name_to_save).sort_values()
     rel_ab_norm.to_csv(os.path.join(output_dir, name_to_save + '_normalised_ra.csv'))
     rel_ab = pd.Series(rel_ab, name = name_to_save).sort_values()
     rel_ab.to_csv(os.path.join(output_dir, name_to_save + '_used_ra.csv'))
 
-    print(f'Calculatiing FREDs for {bam}...')
-    freds = single_functions(function_index,genome_index,gen_ko_1or0,rel_ab,genome_jds,total_jd)
+    print(f'Calculating FREDs for {bam}...')
+    freds = single_functions(function_index,genome_index,gen_ko_1or0,rel_ab)
     freds = pd.DataFrame(freds).set_index('Function')
     freds['Sample'] = pd.Series(name_to_save, index = freds.index)
     freds.to_csv(os.path.join(output_dir, name_to_save + '_sfred.csv'))
-    print('Done')
 
-    print(f'Calculatiing FREDc for {bam}...')
-    fredc = all_functions(gen_ko_1or0,genome_jds,rel_ab,genome_index,function_index)
+    print(f'Calculating FREDc for {bam}...')
+    fredc = all_functions(gen_ko_1or0,genome_jds,rel_ab,genome_index,function_index,mp)
     fredc = pd.Series(fredc, name = name_to_save)
     fredc.to_csv(os.path.join(output_dir, name_to_save + '_cfred.csv'))
-    print('Done')
-    return
+    return name_to_save, al_rate
 
+#to apply multiprocessing across samples 
 def launch_analysis():
     pool = Pool(int(args.processors))
-    pool.starmap(bams_analysis, [(bams_files[i], contigs_lengths_d, genome_contigs, function_index, predicted_functions, genome_index, genome_jds, total_jd, genome_reads[bams_files[i]], output_folder + '/output_fred', float(args.covered_genome_fraction), float(thr_min)) for i in range(len(bams_files))])
+    results =pool.starmap(bams_analysis, [(bams_files[i], contigs_lengths_d, genome_contigs, function_index, predicted_functions, genome_index, genome_jds, genome_reads[bams_files[i]],int(args.minimum_phenotypes), output_folder + '/output_fred', float(args.covered_genome_fraction), float(thr_min)) for i in range(len(bams_files))])
+    return results
 
-####################################################################
-#Statistics FREDs
-#########################################################################################################################################
+##########################################################################################################################################
 if __name__ == '__main__':
-
+    '''Input and output folders generation'''
     script_dir = os.path.dirname(os.path.realpath(__file__))
     os.chdir(script_dir)
 
@@ -525,36 +532,6 @@ if __name__ == '__main__':
         all_fasta = args.all_genomes
         binning_info = args.binning_file
 
-    if args.eggnog_annotation:
-        annotation_folder = args.eggnog_annotation
-    else:
-        print('Annotation with eggNOG-mapper...')
-        subprocess.check_call(['./pipeline_eggnog.sh', genomes_folder, output_folder, genomes_extension, str(args.processors), args.eggnog_database, args.eggnog_sensmode]) 
-        annotation_folder = os.path.join(output_folder, 'input_fred/eggnog_annotations')
-        print('Done')
-    
-    if annotation_folder.endswith('.csv'): 
-        ko_df = pd.read_csv(annotation_folder).set_index('Genomes')
-    else:
-        ###get annotation matrix
-        print('Getting annotation matrix from eggNOG-mapper annotations...')
-        files = [os.path.join(annotation_folder,i) for i in os.listdir(annotation_folder)]
-        data_ko = {}
-        genomes_list = []
-        ko_number = {}
-        for f in files:
-            if f.endswith('.annotations'):
-                print(f'Processing {f} file...')
-                genome, data_ko[genome], ko_number[genome] = get_kos(f)
-                genomes_list.append(genome)
-        df = pd.DataFrame(data_ko).T
-        df.fillna(0, inplace = True)
-        ko_df = pd.DataFrame(data = data_ko).T
-    user_dataset = ko_df.fillna(0)
-    user_dataset.to_csv(os.path.join(output_folder, 'input_fred/annotation_matrix.csv'))
-    print('Done')
-    
-
     if args.bam_files:
         bam_folder = os.path.abspath(args.bam_files)
     elif args.reads_folder:
@@ -579,8 +556,38 @@ if __name__ == '__main__':
     genome_reads = get_reads_number(nreads)
     print('Done\n')
 
-    print(f"Input generation is complete: files are stored in{os.path.join(output_folder, 'input_fred')}\n")
+    if args.eggnog_annotation or args.eggnog_database:
+        if args.eggnog_annotation:
+            annotation_folder = args.eggnog_annotation
+        elif args.eggnog_database:
+            print('Annotation with eggNOG-mapper...')
+            subprocess.check_call(['./pipeline_eggnog.sh', genomes_folder, output_folder, genomes_extension, str(args.processors), args.eggnog_database, args.eggnog_sensmode]) 
+            annotation_folder = os.path.join(output_folder, 'input_fred/eggnog_annotations')
+            print('Done')
+    
+        if annotation_folder.endswith('.csv'): 
+            ko_df = pd.read_csv(annotation_folder).set_index('Genomes')
+        else:
+            ###get annotation matrix
+            print('Getting annotation matrix from eggNOG-mapper annotations...')
+            files = [os.path.join(annotation_folder,i) for i in os.listdir(annotation_folder)]
+            data_ko = {}
+            genomes_list = []
+            ko_number = {}
+            for f in files:
+                if f.endswith('.annotations'):
+                    print(f'Processing {f} file...')
+                    genome, data_ko[genome], ko_number[genome] = get_kos(f)
+                    genomes_list.append(genome)
+            df = pd.DataFrame(data_ko).T
+            df.fillna(0, inplace = True)
+            ko_df = pd.DataFrame(data = data_ko).T
+        user_dataset = ko_df.fillna(0)
+        user_dataset.to_csv(os.path.join(output_folder, 'input_fred/annotation_matrix.csv'))
+        print('Done')
 
+    print(f"Input generation is complete: files are stored in{os.path.join(output_folder, 'input_fred')}\n")
+    
     ##### MICROPHERRET part
     if args.functions_list:
         functions = read_functions(args.functions_list)
@@ -589,13 +596,24 @@ if __name__ == '__main__':
     else:
         functions = read_functions('./functions.txt')
         function_file = './functions.txt'
-    
+
     if args.micropherret_predictions:
         print('miFRED will use provided functions for calculation')
-        predicted_functions = pd.read_csv(args.micropherret_predictions).set_index('Genomes')[functions].loc[list(genome_contigs.keys())]
+        predicted_functions = pd.read_csv(args.micropherret_predictions,index_col=0)[functions]
+        if '.' in args.genomes_extension:
+            extension = args.genomes_extension
+        else:
+            extension = '.'+args.genomes_extension
+        predicted_functions.index = [i[:i.index(extension)] if extension in i else i for i in predicted_functions.index]
+        predicted_functions = predicted_functions.loc[list(genome_contigs.keys())]
         function_index= index_function(function_file)
     elif args.KO:
         print('miFRED will use KO annotations for calculation')
+        if '.' in args.genomes_extension:
+            extension = args.genomes_extension
+        else:
+            extension = '.'+args.genomes_extension
+        ko_df.index = [i[:i.index(extension)] if extension in i else i for i in ko_df.index]
         predicted_functions = ko_df.loc[list(genome_contigs.keys())]
         predicted_functions[predicted_functions > 1] = 1
         predicted_functions.to_csv(os.path.join(output_folder,'input_fred/KO_for_calculation.csv'))
@@ -606,7 +624,7 @@ if __name__ == '__main__':
         print('Loading training set files and generating input for MICROPHERRET...')
         function_index= index_function(function_file)
         training_dataset = pd.read_csv(os.path.join(args.training_sets, 'dataset.csv')).set_index('Genome').drop('Species', axis = 1)
-        training_acetoclastic = pd.read_csv(os.path.join(args.training_sets, 'dataset_acetoclastic_methanogenesis.csv')).set_index('Unnamed: 0').drop('acetoclastic_methanogenesis', axis = 1)
+        training_acetoclastic = pd.read_csv(os.path.join(args.training_sets, 'dataset_acetoclastic_methanogenesis.csv'),index_col=0).drop('acetoclastic_methanogenesis', axis = 1)
 
         print('Adjusting annotation matrix to MICROPHERRET training set...')
         validation_set= get_validation_set(user_dataset, training_dataset)
@@ -614,6 +632,11 @@ if __name__ == '__main__':
         val_aceto = get_validation_set(user_dataset, training_acetoclastic)
         print('Done')
         predicted_functions = validate(functions, validation_set, val_aceto)[0]
+        if '.' in args.genomes_extension:
+            extension = args.genomes_extension
+        else:
+            extension = '.'+args.genomes_extension
+        predicted_functions.index = [i[:i.index(extension)] if extension in i else i for i in predicted_functions.index]
         print(f"Predicted functions stored in {os.path.join(output_folder, 'output_micropherret/predict_functions.csv')}")
         print(f"Number of genomes able to perfomed functions stored in {os.path.join(output_folder, 'output_micropherret/predict_sum.csv')}")
         print('Done\n')
@@ -626,10 +649,7 @@ if __name__ == '__main__':
     genome_jds_df['genome_name'] = list(genome_index.keys())
     genome_jds_df = genome_jds_df.set_index('genome_name')
     genome_jds_df.to_csv(os.path.join(output_folder,'output_fred/jaccard_distances.csv'))
-    total_jd=0 
-    for gen in genome_jds:
-        total_jd+=sum(genome_jds[gen])
-    total_jd=total_jd/(len(genome_contigs)*(len(genome_contigs)-1))
+
     print('Done\n')
 
     print('Processing alignment files...')
@@ -640,20 +660,22 @@ if __name__ == '__main__':
     else:
         thr_min = 0
     
-    launch_analysis()
+    results = launch_analysis()
 
     #################
-    used_ras = pd.concat([pd.read_csv(os.path.join(output_folder,'output_fred/'+i)).set_index('Unnamed: 0') for i in os.listdir(os.path.join(output_folder,'output_fred/')) if i.endswith('_used_ra.csv')], axis = 1).rename_axis( 'Genome')
+    '''Output generation'''
+    #Once the sample-specific files are generated, they are merged into final output files and the temporary files are removed
+    used_ras = pd.concat([pd.read_csv(os.path.join(output_folder,'output_fred/'+i),index_col=0) for i in os.listdir(os.path.join(output_folder,'output_fred/')) if i.endswith('_used_ra.csv')], axis = 1).rename_axis( 'Genome')
     used_ras.to_csv(os.path.join(output_folder,'output_fred/'+'used_relative_abundance.csv'))
     for f in os.listdir(os.path.join(output_folder,'output_fred/')):
         if f.endswith('_used_ra.csv'): os.remove(os.path.join(output_folder,'output_fred/'+f))
 
-    norm_ras = pd.concat([pd.read_csv(os.path.join(output_folder,'output_fred/'+i)).set_index('Unnamed: 0') for i in os.listdir(os.path.join(output_folder,'output_fred/')) if i.endswith('_normalised_ra.csv')], axis = 1).rename_axis('Genome')
+    norm_ras = pd.concat([pd.read_csv(os.path.join(output_folder,'output_fred/'+i),index_col=0) for i in os.listdir(os.path.join(output_folder,'output_fred/')) if i.endswith('_normalised_ra.csv')], axis = 1).rename_axis('Genome')
     norm_ras.to_csv(os.path.join(output_folder,'output_fred/'+'normalised_relative_abundance.csv'))
     for f in os.listdir(os.path.join(output_folder,'output_fred/')):
         if f.endswith('_normalised_ra.csv'): os.remove(os.path.join(output_folder,'output_fred/'+f))
 
-    fredc = pd.concat([pd.read_csv(os.path.join(output_folder,'output_fred/'+i)).set_index('Unnamed: 0') for i in os.listdir(os.path.join(output_folder,'output_fred/')) if i.endswith('cfred.csv')], axis = 1).T.rename_axis('Sample')
+    fredc = pd.concat([pd.read_csv(os.path.join(output_folder,'output_fred/'+i),index_col=0) for i in os.listdir(os.path.join(output_folder,'output_fred/')) if i.endswith('cfred.csv')], axis = 1).T.rename_axis('Sample')
     fredc.to_csv(os.path.join(output_folder,'output_fred/'+'fredc.csv'))
     for f in os.listdir(os.path.join(output_folder,'output_fred/')):
         if f.endswith('cfred.csv'): os.remove(os.path.join(output_folder,'output_fred/'+f))
@@ -663,6 +685,41 @@ if __name__ == '__main__':
     for f in os.listdir(os.path.join(output_folder,'output_fred/')):
         if f.endswith('sfred.csv'): os.remove(os.path.join(output_folder,'output_fred/'+f))
     
+    # Alignment rates outputs
+    alignment_rates = (pd.Series({sample: rate for sample, rate in results}, name="Alignment_rate").rename_axis("Sample"))
+    alignment_rates.to_csv(os.path.join(output_folder,"output_fred","alignment_rates.csv"))
+    if len(alignment_rates) > 1:
+        plt.figure(figsize=(4,6))
+        sns.boxplot(y=alignment_rates)
+        sns.stripplot(y=alignment_rates,color="black",alpha=0.6)
+        plt.ylabel("Alignment rate")
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_folder,"output_fred","Alignment_Rates_boxplot.png"),dpi=600)
+        plt.close()
+    
+    
+    #Save excluded genomes
+    detected = {sample: set(norm_ras.index[norm_ras[sample] > 0]) for sample in norm_ras.columns}
+    after_ra = {sample: set(used_ras.index[used_ras[sample] > 0]) for sample in used_ras.columns}
+    
+    predicted_functions_here = predicted_functions.T[list(genome_index)].to_dict()
+    excluded_genomes = {genome for genome in predicted_functions_here if sum(predicted_functions_here[genome].values()) < int(args.minimum_phenotypes)}
+    
+    summary = []
+    for sample in used_ras.columns:
+        excluded_here = after_ra[sample] & excluded_genomes
+        final = after_ra[sample] - excluded_here
+        
+        summary.append({"Sample": sample,"Detected genomes": len(detected[sample]), "Genomes_after_RA_threshold": len(after_ra[sample]),
+                        "Excluded_by_minumum_phenotypes": len(excluded_here), "Final genomes": len(final), 
+                        "Community_remaining_percent":100 * len(final) / len(after_ra[sample]) if len(after_ra[sample]) else 0})
+
+    summary = pd.DataFrame(summary).set_index("Sample")
+    summary.to_csv(os.path.join(output_folder,"output_fred","genome_filtering_summary.csv"))
+    
+    excluded_df = pd.DataFrame(sorted(excluded_genomes),columns=["Genome"])
+    excluded_df.to_csv(os.path.join(output_folder,"output_fred","excluded_genomes_forFREDc.csv"),index=False)
+
     if len(fredc) > 1:
         #Statistics FREDs
         FREDs_stat = {}
@@ -702,16 +759,3 @@ if __name__ == '__main__':
 
     print(f"FRED calculation is complete, output files and plots are stored in {os.path.join(output_folder,'output_fred/')}")
     print('Enjoy your analysis!')
-    
-
-    
-
-    
-
-
-
-    
-
-
-
-
