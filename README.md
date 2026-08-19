@@ -15,7 +15,7 @@ miFRED can automatically generate any missing input file using built-in software
 - sorted bam files generation with Samtools.
 eggNOG-mapper annotation and alignment files can be provided directly as input. 
 
-The core process uses MICROPHERRET function-specific ML models for phenotype prediction and calculates FRED.  For the acetoclastic methanogenesis phenotype, the refined version of the model previously provided by the authors was used. The obtained functional profiles are scanned to generate a Jaccard distance matrix, representing the functional overlap within genome pairs. By default, the Jaccard distance between genomes without associated functions is set to 1. 
+The core process uses MICROPHERRET function-specific ML models for phenotype prediction and calculates FRED.  For the acetoclastic methanogenesis phenotype, the refined version of the model previously provided by the authors was used. The obtained functional profiles are scanned to generate a Jaccard distance matrix, representing the functional overlap within genome pairs. By default, genomes without predicted phenotypes are excluded from community-level calculations. If users want genomes with no functions to be considered, the Jaccard distance between genomes without associated functions is set to 1. 
 Alignment results are processed to calculate relative abundances, which, along with the Jaccard distance matrix and predicted functional profiles, are used to compute FREDc and FREDs metrics. 
 
 miFRED calculates the following metrics:
