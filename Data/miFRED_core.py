@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument('-s', '--training_sets', default = 'training_sets', help = 'Folder containing the dataset.csv and dataset_acetoclastic_methanogenesis.csv files to be used in the training. (default: ./training_sets/ )')
     parser.add_argument('-c', '--covered_genome_fraction', default= 0.1, help = 'Genomes with a fraction of covered bases lower than this are reported as having zero coverage. (default: 0.10)')
     parser.add_argument('-t', '--relative_abundance_threshold', default= 0, help = 'Minimum relative abundance threshold to be considered as present in the sample. (default: 0)')
-    parser.add_argument('-mp', '--minimum_phenotypes', default= 0, help = 'Minimum number of predicted phenotypes for the genome to be considered in FREDc calculation. (default: 0)')
+    parser.add_argument('-mp', '--minimum_phenotypes', default= 1, help = 'Minimum number of predicted phenotypes for the genome to be considered in FREDc calculation. (default: 1)')
     group_ko_vs_pred = parser.add_mutually_exclusive_group()
     group_ko_vs_pred.add_argument('-m', '--micropherret_predictions', help = 'csv file containing MICROPHERRET predictions for all the genomes.')
     group_ko_vs_pred.add_argument('-k', '--KO', action='store_true', help = 'perform calculation based on KO')
